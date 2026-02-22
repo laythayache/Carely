@@ -58,6 +58,7 @@ class AudioBridge:
         # Accumulated speech data after VAD_END
         self._speech_buffer = bytearray()
         self._collecting_speech = False
+        self._speech_ready = threading.Event()  # Set when speech data is fully received
 
     def set_amplitude_callback(self, cb: Callable[[float], Any]) -> None:
         """Set callback for amplitude values (called from reader thread)."""
@@ -93,6 +94,7 @@ class AudioBridge:
         """Tell C++ to start VAD-monitored capture."""
         self._speech_buffer.clear()
         self._collecting_speech = False
+        self._speech_ready.clear()
         self._send_command(CMD_START_CAPTURE)
 
     def send_stop_capture(self) -> None:
@@ -104,8 +106,14 @@ class AudioBridge:
         """Change VAD aggressiveness (0-3)."""
         self._send_command(CMD_SET_VAD_MODE, bytes([aggressiveness]))
 
-    def get_speech_data(self) -> bytes:
-        """Return the accumulated speech PCM data from last VAD session."""
+    def get_speech_data(self, timeout: float = 5.0) -> bytes:
+        """
+        Return the accumulated speech PCM data from last VAD session.
+        Blocks up to `timeout` seconds waiting for speech data to arrive
+        after VAD_END (fixes race condition between VAD_END event and
+        the subsequent AUDIO_FRAME containing speech data).
+        """
+        self._speech_ready.wait(timeout=timeout)
         return bytes(self._speech_buffer)
 
     def _send_command(self, cmd: int, payload: bytes = b"") -> None:
@@ -187,7 +195,7 @@ class AudioBridge:
             if self._collecting_speech:
                 self._speech_buffer.extend(payload)
                 self._collecting_speech = False
-                # Emit event with speech data
+                self._speech_ready.set()  # Signal that speech data is available
                 self._emit_event("speech_data", bytes(self._speech_buffer))
             elif self._audio_frame_callback:
                 self._audio_frame_callback(payload)

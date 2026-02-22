@@ -156,6 +156,7 @@ def load_config(env_path: str | Path | None = None) -> Config:
         watchdog_interval_s=_get_env_int("WATCHDOG_INTERVAL_S", Config.watchdog_interval_s),
         crash_loop_threshold=_get_env_int("CRASH_LOOP_THRESHOLD", Config.crash_loop_threshold),
         crash_loop_window_s=_get_env_int("CRASH_LOOP_WINDOW_S", Config.crash_loop_window_s),
+        ipc_socket_path=_get_env("IPC_SOCKET_PATH", Config.ipc_socket_path),
     )
 
     validate_config(config)

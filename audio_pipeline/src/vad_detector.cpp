@@ -1,91 +1,92 @@
 /**
- * VAD detector implementation using WebRTC VAD API.
+ * Energy-based VAD detector implementation.
+ *
+ * Works on APM-cleaned audio (post noise suppression) so a simple
+ * energy threshold is effective. Tracks a slow-adapting noise floor
+ * and triggers on energy exceeding threshold above floor.
+ *
+ * Aggressiveness mapping:
+ *   0 = low threshold  (sensitive, more false positives)
+ *   1 = medium-low
+ *   2 = medium-high
+ *   3 = high threshold (aggressive, fewer false positives)
  */
 
 #include "vad_detector.h"
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <algorithm>
 
-// WebRTC VAD C API
-extern "C" {
-    typedef struct WebRtcVadInst VadInst;
-    VadInst* WebRtcVad_Create(void);
-    int WebRtcVad_Init(VadInst* handle);
-    int WebRtcVad_set_mode(VadInst* handle, int mode);
-    int WebRtcVad_Process(VadInst* handle, int fs, const int16_t* audio_frame,
-                          size_t frame_length);
-    void WebRtcVad_Free(VadInst* handle);
-}
+// Energy threshold multipliers for each aggressiveness level
+static constexpr float THRESHOLD_MULTIPLIERS[4] = {
+    3.0f,   // 0: very sensitive
+    5.0f,   // 1: sensitive
+    8.0f,   // 2: moderate
+    12.0f,  // 3: aggressive (recommended for noisy homes)
+};
 
 VadDetector::VadDetector(const Config& config) : config_(config) {
-    // Convert ms thresholds to frame counts (1 frame = 10ms)
     speech_start_frames_ = config.speech_start_ms / 10;
     silence_end_frames_ = config.silence_end_ms / 10;
     min_speech_frames_ = config.min_speech_ms / 10;
     max_utterance_frames_ = config.max_utterance_ms / 10;
 
-    // Pre-roll buffer capacity in samples
     preroll_capacity_ = (config.preroll_ms / 10) * FRAME_SIZE;
     preroll_buffer_.resize(preroll_capacity_, 0);
-}
 
-VadDetector::~VadDetector() {
-    if (vad_handle_) {
-        WebRtcVad_Free(static_cast<VadInst*>(vad_handle_));
-    }
+    // Set energy threshold based on aggressiveness
+    int agg = std::clamp(config.aggressiveness, 0, 3);
+    energy_threshold_ = 0.005f * THRESHOLD_MULTIPLIERS[agg];
 }
 
 bool VadDetector::initialize() {
-    auto* inst = WebRtcVad_Create();
-    if (!inst) {
-        fprintf(stderr, "[vad] Failed to create VAD instance\n");
-        return false;
-    }
-
-    if (WebRtcVad_Init(inst) != 0) {
-        fprintf(stderr, "[vad] Failed to initialize VAD\n");
-        WebRtcVad_Free(inst);
-        return false;
-    }
-
-    if (WebRtcVad_set_mode(inst, config_.aggressiveness) != 0) {
-        fprintf(stderr, "[vad] Failed to set aggressiveness to %d\n", config_.aggressiveness);
-        WebRtcVad_Free(inst);
-        return false;
-    }
-
-    vad_handle_ = inst;
-    fprintf(stdout, "[vad] Initialized (aggressiveness=%d, silence_end=%dms)\n",
-            config_.aggressiveness, config_.silence_end_ms);
+    fprintf(stdout, "[vad] Initialized energy-based VAD "
+            "(aggressiveness=%d, threshold=%.4f, silence_end=%dms)\n",
+            config_.aggressiveness, energy_threshold_, config_.silence_end_ms);
     return true;
 }
 
-VadDetector::Event VadDetector::process_frame(const int16_t* frame) {
-    if (!vad_handle_) return Event::NONE;
+float VadDetector::compute_rms(const int16_t* frame) const {
+    double sum_sq = 0.0;
+    for (int i = 0; i < FRAME_SIZE; i++) {
+        double s = static_cast<double>(frame[i]) / 32768.0;
+        sum_sq += s * s;
+    }
+    return static_cast<float>(std::sqrt(sum_sq / FRAME_SIZE));
+}
 
-    auto* inst = static_cast<VadInst*>(vad_handle_);
-    int is_voiced = WebRtcVad_Process(inst, SAMPLE_RATE, frame, FRAME_SIZE);
+bool VadDetector::is_voiced(const int16_t* frame) const {
+    float rms = compute_rms(frame);
+    // Voiced if energy exceeds threshold above tracked noise floor
+    return rms > (noise_floor_ + energy_threshold_);
+}
+
+VadDetector::Event VadDetector::process_frame(const int16_t* frame) {
+    float rms = compute_rms(frame);
+    bool voiced = rms > (noise_floor_ + energy_threshold_);
+
+    // Update noise floor during silence (slow adaptation)
+    if (!voiced && state_ == InternalState::WAITING) {
+        noise_floor_ = noise_floor_alpha_ * noise_floor_ + (1.0f - noise_floor_alpha_) * rms;
+    }
 
     switch (state_) {
         case InternalState::WAITING: {
-            // Always update pre-roll buffer
             std::memcpy(&preroll_buffer_[preroll_write_pos_], frame, FRAME_SIZE * sizeof(int16_t));
             preroll_write_pos_ = (preroll_write_pos_ + FRAME_SIZE) % preroll_capacity_;
 
-            if (is_voiced) {
+            if (voiced) {
                 voiced_frame_count_++;
                 if (voiced_frame_count_ >= speech_start_frames_) {
-                    // Speech detected — transition to SPEAKING
                     state_ = InternalState::SPEAKING;
                     total_speech_frames_ = 0;
                     silence_frame_count_ = 0;
 
-                    // Copy pre-roll buffer into speech buffer
                     speech_buffer_.clear();
-                    speech_buffer_.reserve(preroll_capacity_ + SAMPLE_RATE * 30);  // Reserve 30s
+                    speech_buffer_.reserve(preroll_capacity_ + SAMPLE_RATE * 30);
 
-                    // Read pre-roll from the circular buffer
+                    // Copy pre-roll
                     size_t read_pos = preroll_write_pos_;
                     for (size_t i = 0; i < preroll_capacity_; i += FRAME_SIZE) {
                         speech_buffer_.insert(speech_buffer_.end(),
@@ -94,7 +95,6 @@ VadDetector::Event VadDetector::process_frame(const int16_t* frame) {
                         read_pos = (read_pos + FRAME_SIZE) % preroll_capacity_;
                     }
 
-                    // Also add current frame
                     speech_buffer_.insert(speech_buffer_.end(), frame, frame + FRAME_SIZE);
                     total_speech_frames_++;
 
@@ -107,17 +107,15 @@ VadDetector::Event VadDetector::process_frame(const int16_t* frame) {
         }
 
         case InternalState::SPEAKING: {
-            // Accumulate audio
             speech_buffer_.insert(speech_buffer_.end(), frame, frame + FRAME_SIZE);
             total_speech_frames_++;
 
-            if (is_voiced) {
+            if (voiced) {
                 silence_frame_count_ = 0;
             } else {
                 silence_frame_count_++;
             }
 
-            // Check for end conditions
             bool silence_end = silence_frame_count_ >= silence_end_frames_;
             bool max_duration = total_speech_frames_ >= max_utterance_frames_;
 
@@ -127,12 +125,10 @@ VadDetector::Event VadDetector::process_frame(const int16_t* frame) {
                             config_.max_utterance_ms / 1000);
                 }
 
-                // Check minimum speech duration
                 if (total_speech_frames_ >= min_speech_frames_) {
                     state_ = InternalState::DONE;
                     return Event::VAD_END;
                 } else {
-                    // Too short — discard and reset
                     fprintf(stdout, "[vad] Speech too short (%dms), discarding\n",
                             total_speech_frames_ * 10);
                     reset();
@@ -142,7 +138,6 @@ VadDetector::Event VadDetector::process_frame(const int16_t* frame) {
         }
 
         case InternalState::DONE:
-            // Waiting for reset() to be called
             break;
     }
 

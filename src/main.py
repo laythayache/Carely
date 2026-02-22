@@ -171,8 +171,10 @@ class Orchestrator:
         self.fsm.set_recording(False)
         self.keyword_spotter.resume()
 
-        # Get speech data and run STT
-        speech_data = self.audio_bridge.get_speech_data()
+        # Get speech data (blocks up to 5s waiting for data from C++ pipeline)
+        speech_data = await asyncio.get_event_loop().run_in_executor(
+            None, self.audio_bridge.get_speech_data
+        )
         if not speech_data:
             logger.warning("No speech data available")
             return
@@ -449,6 +451,10 @@ class Orchestrator:
 
 def main() -> None:
     """Entry point."""
+    # Create event loop FIRST — Orchestrator passes it to threads
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     config = load_config()
     setup_logging(config)
 
@@ -456,9 +462,6 @@ def main() -> None:
     logger.info(f"Webhook: {config.webhook_url}")
 
     orchestrator = Orchestrator(config)
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     # Handle shutdown signals
     for sig in (signal.SIGINT, signal.SIGTERM):

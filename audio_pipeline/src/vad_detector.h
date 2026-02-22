@@ -1,7 +1,18 @@
 /**
- * Voice Activity Detection using WebRTC VAD.
+ * Energy-based Voice Activity Detection.
+ *
+ * Works on APM-cleaned audio (post noise suppression) so a simple
+ * energy threshold is effective. Tracks a slow-adapting noise floor
+ * and triggers on energy exceeding threshold above floor.
+ *
  * Implements pre-roll buffer, speech start/end logic,
  * min speech duration, max utterance cap.
+ *
+ * Aggressiveness mapping:
+ *   0 = low threshold  (sensitive, more false positives)
+ *   1 = medium-low
+ *   2 = medium-high
+ *   3 = high threshold (aggressive, fewer false positives)
  */
 
 #pragma once
@@ -32,7 +43,7 @@ public:
     using EventCallback = std::function<void(Event, const int16_t*, size_t)>;
 
     explicit VadDetector(const Config& config);
-    ~VadDetector();
+    ~VadDetector() = default;
 
     VadDetector(const VadDetector&) = delete;
     VadDetector& operator=(const VadDetector&) = delete;
@@ -62,6 +73,11 @@ public:
      */
     bool force_end();
 
+    /**
+     * Check if a single frame is voiced (energy above threshold + noise floor).
+     */
+    bool is_voiced(const int16_t* frame) const;
+
     static constexpr int FRAME_SIZE = 160;  // 10ms at 16kHz
     static constexpr int SAMPLE_RATE = 16000;
 
@@ -72,9 +88,18 @@ private:
         DONE,      // Speech segment complete
     };
 
+    /**
+     * Compute RMS energy of a frame, normalized to [0.0, 1.0].
+     */
+    float compute_rms(const int16_t* frame) const;
+
     Config config_;
-    void* vad_handle_ = nullptr;  // WebRTC VAD handle (opaque)
     InternalState state_ = InternalState::WAITING;
+
+    // Energy-based VAD parameters
+    float energy_threshold_ = 0.0f;    // Set from aggressiveness in constructor
+    float noise_floor_ = 0.01f;        // Adaptive noise floor estimate
+    float noise_floor_alpha_ = 0.995f; // Slow adaptation rate
 
     // Pre-roll circular buffer
     std::vector<int16_t> preroll_buffer_;

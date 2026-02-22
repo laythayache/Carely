@@ -13,13 +13,13 @@ pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
 pkg_check_modules(WEBRTC_APM REQUIRED webrtc-audio-processing-1)
 
 # Source files
+# amplitude_calc.h is header-only (no .cpp)
 set(SOURCES
     src/main.cpp
     src/pipewire_capture.cpp
     src/pipewire_monitor.cpp
     src/apm_processor.cpp
     src/vad_detector.cpp
-    src/amplitude_calc.cpp
     src/ipc_server.cpp
 )
 
