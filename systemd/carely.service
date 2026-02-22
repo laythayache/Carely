@@ -1,0 +1,25 @@
+[Unit]
+Description=Carely Voice Assistant (Python)
+After=carely-audio.service
+Requires=carely-audio.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/opt/assistant/venv/bin/python -m src.main
+WorkingDirectory=/opt/assistant
+EnvironmentFile=/opt/assistant/.env
+Restart=on-failure
+RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=300
+WatchdogSec=30
+User=carely
+Group=audio
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=carely-main
+
+[Install]
+WantedBy=multi-user.target
