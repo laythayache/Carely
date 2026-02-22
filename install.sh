@@ -65,12 +65,14 @@ setup_user() {
     fi
     sudo mkdir -p "$INSTALL_DIR" "$MODEL_DIR/whisper" "$MODEL_DIR/piper" "$BIN_DIR"
     sudo mkdir -p /var/log/carely
-    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" /var/log/carely
+    sudo chown -R "$SERVICE_USER:$SERVICE_USER" /var/log/carely
 }
 
 # ── Step 3: Clone or Update Repository ──────────────────────
 setup_repo() {
     step "Setting up repository"
+    # Tell git to trust this directory (avoids "dubious ownership" error)
+    git config --global --add safe.directory "$INSTALL_DIR"
     if [ -d "$INSTALL_DIR/.git" ]; then
         log "Repository exists, pulling latest..."
         cd "$INSTALL_DIR" && git pull origin main
@@ -79,7 +81,6 @@ setup_repo() {
         sudo chown "$(whoami)" "$INSTALL_DIR"
         git clone https://github.com/laythayache/Carely.git "$INSTALL_DIR"
     fi
-    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 }
 
 # ── Step 4: Build whisper.cpp ────────────────────────────────
@@ -224,6 +225,12 @@ main() {
     install_services
     setup_config
     set_cpu_governor
+
+    # Set final ownership — done AFTER all builds so git/cmake aren't blocked
+    step "Setting file ownership"
+    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+    log "Ownership set to $SERVICE_USER"
+
     validate_install
 
     log ""
