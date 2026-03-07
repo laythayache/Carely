@@ -108,7 +108,7 @@ class WebhookClient:
 
     async def start(self) -> None:
         """Create the HTTP session."""
-        timeout = aiohttp.ClientTimeout(total=self.timeout_s)
+        timeout = aiohttp.ClientTimeout(total=self.timeout_s if self.timeout_s > 0 else None)
         headers = {"Content-Type": "application/json"}
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"

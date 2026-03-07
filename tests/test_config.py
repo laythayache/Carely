@@ -13,7 +13,7 @@ class TestConfigDefaults:
         assert default_config.vad_aggressiveness == 3
 
     def test_default_webhook_timeout(self, default_config):
-        assert default_config.webhook_timeout_s == 120.0
+        assert default_config.webhook_timeout_s == 0
 
     def test_default_whisper_threads(self, default_config):
         assert default_config.whisper_threads == 3

@@ -23,7 +23,7 @@ class Config:
 
     # Webhook
     webhook_url: str = "http://192.168.1.100:5678/webhook/carely"
-    webhook_timeout_s: float = 120.0
+    webhook_timeout_s: float = 0
     webhook_max_retries: int = 0
     webhook_retry_backoff_ms: int = 500
     webhook_auth_token: str = ""
@@ -173,8 +173,8 @@ def validate_config(config: Config) -> None:
     if not config.webhook_url.startswith(("http://", "https://")):
         errors.append(f"WEBHOOK_URL must start with http:// or https://, got: {config.webhook_url}")
 
-    if config.webhook_timeout_s <= 0:
-        errors.append(f"WEBHOOK_TIMEOUT_S must be positive, got: {config.webhook_timeout_s}")
+    if config.webhook_timeout_s < 0:
+        errors.append(f"WEBHOOK_TIMEOUT_S must be >= 0 (0 = no timeout), got: {config.webhook_timeout_s}")
 
     if config.webhook_max_retries < 0:
         errors.append(f"WEBHOOK_MAX_RETRIES must be >= 0, got: {config.webhook_max_retries}")
