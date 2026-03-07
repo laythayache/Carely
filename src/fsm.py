@@ -265,8 +265,6 @@ class FSM:
         # Schedule timeouts for states that need them
         if next_state == State.LISTENING:
             self._schedule_timeout(15.0)
-        elif next_state == State.PROCESSING:
-            self._schedule_timeout(12.0)
         elif next_state == State.ERROR:
             self._schedule_timeout(10.0)
         elif next_state == State.EMERGENCY:

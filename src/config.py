@@ -23,8 +23,8 @@ class Config:
 
     # Webhook
     webhook_url: str = "http://192.168.1.100:5678/webhook/carely"
-    webhook_timeout_s: float = 8.0
-    webhook_max_retries: int = 2
+    webhook_timeout_s: float = 120.0
+    webhook_max_retries: int = 0
     webhook_retry_backoff_ms: int = 500
     webhook_auth_token: str = ""
 
