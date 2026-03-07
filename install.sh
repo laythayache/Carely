@@ -75,11 +75,10 @@ setup_repo() {
     git config --global --add safe.directory "$INSTALL_DIR"
     if [ -d "$INSTALL_DIR/.git" ]; then
         log "Repository exists, pulling latest..."
-        cd "$INSTALL_DIR" && git pull origin main
+        sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" pull origin main
     else
         log "Cloning repository..."
-        sudo chown "$(whoami)" "$INSTALL_DIR"
-        git clone https://github.com/laythayache/Carely.git "$INSTALL_DIR"
+        sudo -u "$SERVICE_USER" git clone https://github.com/laythayache/Carely.git "$INSTALL_DIR"
     fi
 }
 
