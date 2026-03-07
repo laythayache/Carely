@@ -14,6 +14,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 from typing import Any
 
 from src.config import load_config, setup_logging, Config
@@ -159,33 +160,45 @@ class Orchestrator:
     # ── FSM Actions ──────────────────────────────────────────────
 
     async def _action_start_listening(self, data: TransitionResult | None) -> None:
-        self.fsm.new_turn()
+        turn_id = self.fsm.new_turn()
+        logger.info(f"[LISTEN] Starting new turn {turn_id}, sending start_capture to audio bridge")
         self.audio_bridge.send_start_capture()
-        self.keyword_spotter.pause()  # Save CPU during active listening
+        self.keyword_spotter.pause()
+        logger.info(f"[LISTEN] Keyword spotter paused, waiting for speech...")
 
     async def _action_on_vad_start(self, data: TransitionResult | None) -> None:
+        logger.info(f"[VAD] Speech detected! Recording started (turn={self.fsm.current_turn_id})")
         self.fsm.set_recording(True)
 
     async def _action_process_speech(self, data: TransitionResult | None) -> None:
+        process_start = time.monotonic()
+        logger.info(f"[PROCESS] Stopping capture, beginning speech processing (turn={self.fsm.current_turn_id})")
         self.audio_bridge.send_stop_capture()
         self.fsm.set_recording(False)
         self.keyword_spotter.resume()
 
-        # Get speech data (blocks up to 5s waiting for data from C++ pipeline)
+        logger.info("[PROCESS] Waiting for speech data from audio bridge...")
         speech_data = await asyncio.get_event_loop().run_in_executor(
             None, self.audio_bridge.get_speech_data
         )
         if not speech_data:
-            logger.warning("No speech data available")
+            logger.warning("[PROCESS] No speech data received from audio bridge - aborting")
             return
+        logger.info(f"[PROCESS] Got {len(speech_data)} bytes of speech data ({len(speech_data) / 32000:.1f}s of audio)")
 
         try:
+            logger.info("[STT] Starting transcription...")
+            stt_start = time.monotonic()
             result = await self.stt.transcribe(speech_data, self.fsm.cancel_event)
+            stt_elapsed = int((time.monotonic() - stt_start) * 1000)
+            logger.info(f"[STT] Completed in {stt_elapsed}ms: text='{result.text}', lang={result.language}, conf={result.language_confidence:.2f}")
+
             if not result.text.strip():
-                logger.info("STT returned empty transcript, ignoring")
+                logger.warning("[STT] Empty transcript returned - firing TIMEOUT to return to idle")
                 await self.fsm.handle_event(Event.TIMEOUT)
                 return
 
+            logger.info(f"[UI] Broadcasting transcript to {self.ui_server.client_count} WS clients")
             await self.ui_server.broadcast_transcript(result.text, result.language)
             stt_data = TransitionResult(
                 turn_id=self.fsm.current_turn_id,
@@ -194,24 +207,31 @@ class Orchestrator:
                 language_confidence=result.language_confidence,
                 metadata={"stt_latency_ms": result.latency_ms},
             )
+            logger.info(f"[PROCESS] Firing STT_COMPLETE event (turn={self.fsm.current_turn_id}, elapsed={int((time.monotonic() - process_start) * 1000)}ms)")
             await self.fsm.handle_event(Event.STT_COMPLETE, stt_data)
 
         except asyncio.CancelledError:
-            logger.info("STT cancelled")
+            logger.warning(f"[STT] Cancelled after {int((time.monotonic() - stt_start) * 1000)}ms")
 
     async def _action_force_process_speech(self, data: TransitionResult | None) -> None:
-        # Same as process_speech but triggered by long-press
+        logger.info("[PROCESS] Force-processing speech (long-press triggered)")
         await self._action_process_speech(data)
 
     async def _action_cancel_listening(self, data: TransitionResult | None) -> None:
+        logger.info(f"[CANCEL] Cancelling listening (turn={self.fsm.current_turn_id})")
         self.audio_bridge.send_stop_capture()
         self.fsm.cancel_current_turn()
         self.fsm.set_recording(False)
         self.keyword_spotter.resume()
+        logger.info("[CANCEL] Listening cancelled, returned to idle")
 
     async def _action_send_webhook(self, data: TransitionResult | None) -> None:
         if not data or not data.transcript:
+            logger.warning("[WEBHOOK] send_webhook called with no transcript data - skipping")
             return
+
+        logger.info(f"[WEBHOOK] Sending to n8n: transcript='{data.transcript[:100]}', lang={data.language}, turn={self.fsm.current_turn_id}")
+        webhook_start = time.monotonic()
 
         try:
             response = await self.webhook.send_turn(
@@ -222,10 +242,11 @@ class Orchestrator:
                 metadata=data.metadata,
                 cancel_event=self.fsm.cancel_event,
             )
+            webhook_elapsed = int((time.monotonic() - webhook_start) * 1000)
+            logger.info(f"[WEBHOOK] Response received in {webhook_elapsed}ms: spoken_text='{(response.spoken_text or '')[:100]}', lang={response.language}, turn={response.turn_id}")
 
-            # Check if turn is still valid (not cancelled by barge-in)
             if not self.fsm.is_turn_valid(response.turn_id):
-                logger.info(f"Discarding stale webhook response for turn {response.turn_id}")
+                logger.warning(f"[WEBHOOK] Discarding STALE response - turn {response.turn_id} no longer active (current={self.fsm.current_turn_id})")
                 return
 
             webhook_data = TransitionResult(
@@ -233,23 +254,31 @@ class Orchestrator:
                 spoken_text=response.spoken_text,
                 voice_language=response.language,
             )
+            logger.info(f"[WEBHOOK] Firing WEBHOOK_RESPONSE event")
             await self.fsm.handle_event(Event.WEBHOOK_RESPONSE, webhook_data)
 
-        except WebhookUnavailableError:
+        except WebhookUnavailableError as e:
+            webhook_elapsed = int((time.monotonic() - webhook_start) * 1000)
+            logger.error(f"[WEBHOOK] FAILED after {webhook_elapsed}ms: {e}")
             await self.fsm.handle_event(
                 Event.WEBHOOK_TIMEOUT,
                 TransitionResult(transcript=data.transcript),
             )
         except asyncio.CancelledError:
-            logger.info("Webhook cancelled")
+            webhook_elapsed = int((time.monotonic() - webhook_start) * 1000)
+            logger.warning(f"[WEBHOOK] Cancelled after {webhook_elapsed}ms")
 
     async def _action_start_speaking(self, data: TransitionResult | None) -> None:
         if not data or not data.spoken_text:
+            logger.warning("[TTS] No spoken_text in data - skipping TTS, firing TTS_COMPLETE")
             await self.fsm.handle_event(Event.TTS_COMPLETE)
             return
 
+        logger.info(f"[TTS] Starting speech: text='{data.spoken_text[:100]}', lang={data.voice_language or 'en'}")
+        logger.info(f"[UI] Broadcasting response to {self.ui_server.client_count} WS clients")
         await self.ui_server.broadcast_response(data.spoken_text, data.voice_language or "en")
 
+        tts_start = time.monotonic()
         try:
             def amplitude_cb(val: float) -> None:
                 try:
@@ -267,46 +296,54 @@ class Orchestrator:
                 cancel_event=self.fsm.cancel_event,
                 amplitude_callback=amplitude_cb,
             )
+            tts_elapsed = int((time.monotonic() - tts_start) * 1000)
+            logger.info(f"[TTS] Playback finished in {tts_elapsed}ms, firing TTS_COMPLETE")
             await self.fsm.handle_event(Event.TTS_COMPLETE)
 
         except asyncio.CancelledError:
-            logger.info("TTS cancelled")
+            tts_elapsed = int((time.monotonic() - tts_start) * 1000)
+            logger.warning(f"[TTS] Cancelled after {tts_elapsed}ms")
 
     async def _action_handle_webhook_failure(self, data: TransitionResult | None) -> None:
-        # Try fallback agent
+        logger.error(f"[FALLBACK] Webhook failed, trying fallback agent (transcript='{(data.transcript if data else 'None')}')")
         if data and data.transcript:
             fallback_response = self.fallback.match(data.transcript)
             if fallback_response:
-                logger.info(f"Fallback matched: {fallback_response.spoken_text[:50]}")
+                logger.info(f"[FALLBACK] Matched! Response: '{fallback_response.spoken_text[:80]}', transitioning to SPEAKING")
                 speak_data = TransitionResult(
                     spoken_text=fallback_response.spoken_text,
                     voice_language=fallback_response.language,
                 )
-                # Go directly to speaking
                 await self.fsm._transition_to(State.SPEAKING, "start_speaking", speak_data)
                 return
 
-        # No fallback match — show error
+        logger.error("[FALLBACK] No fallback match - showing error to user")
         error_msg = "I couldn't reach the server. Please try again."
         await self.ui_server.broadcast_error(error_msg, "WEBHOOK_TIMEOUT")
 
     async def _action_handle_processing_timeout(self, data: TransitionResult | None) -> None:
+        logger.error(f"[TIMEOUT] Processing timed out (turn={self.fsm.current_turn_id})")
         self.fsm.cancel_current_turn()
         await self.ui_server.broadcast_error("Processing took too long.", "PROCESSING_TIMEOUT")
 
     async def _action_cancel_processing(self, data: TransitionResult | None) -> None:
+        logger.info(f"[CANCEL] User cancelled processing (turn={self.fsm.current_turn_id})")
         self.fsm.cancel_current_turn()
 
     async def _action_on_tts_complete(self, data: TransitionResult | None) -> None:
+        logger.info(f"[COMPLETE] Turn complete (turn={self.fsm.current_turn_id}), clearing UI transcript")
         self.fsm.cancel_current_turn()
         await self.ui_server.broadcast_transcript("")
 
     async def _action_barge_in(self, data: TransitionResult | None) -> None:
+        logger.info(f"[BARGE-IN] User interrupted speech (turn={self.fsm.current_turn_id})")
         await self.tts.stop()
         self.fsm.cancel_current_turn()
         await self.ui_server.broadcast_transcript("")
+        logger.info("[BARGE-IN] TTS stopped, turn cancelled")
 
     async def _action_emergency_during_speech(self, data: TransitionResult | None) -> None:
+        logger.warning("[EMERGENCY] Emergency triggered during speech - stopping TTS")
         await self.tts.stop()
         self.fsm.cancel_current_turn()
         await self._action_handle_emergency(data)
@@ -318,30 +355,35 @@ class Orchestrator:
             keyword = data.metadata.get("keyword", "unknown")
             transcript = f"EMERGENCY: User said '{keyword}'"
 
+        logger.warning(f"[EMERGENCY] Sending emergency webhook: '{transcript}' (turn={turn_id})")
         try:
             response = await self.webhook.send_emergency(
                 transcript=transcript,
                 turn_id=turn_id,
             )
+            logger.info(f"[EMERGENCY] Webhook response: '{(response.spoken_text or '')[:80]}', lang={response.language}")
             speak_data = TransitionResult(
                 turn_id=response.turn_id,
                 spoken_text=response.spoken_text,
                 voice_language=response.language,
             )
             await self.fsm.handle_event(Event.WEBHOOK_RESPONSE, speak_data)
-        except (WebhookUnavailableError, Exception):
+        except (WebhookUnavailableError, Exception) as e:
+            logger.error(f"[EMERGENCY] Webhook failed: {e}")
             await self.fsm.handle_event(Event.WEBHOOK_TIMEOUT)
 
     async def _action_speak_offline_emergency(self, data: TransitionResult | None) -> None:
+        logger.warning("[EMERGENCY] Webhook unavailable - using offline emergency response")
         response = self.fallback.get_offline_emergency()
+        logger.info(f"[EMERGENCY] Offline response: '{response.spoken_text[:80]}'")
         speak_data = TransitionResult(
             spoken_text=response.spoken_text,
             voice_language=response.language,
         )
-        # Bypass FSM transition — directly speak
         await self._action_start_speaking(speak_data)
 
     async def _action_dismiss_error(self, data: TransitionResult | None) -> None:
+        logger.info("[ERROR] Dismissing error, returning to idle")
         self.fsm.cancel_current_turn()
 
     async def _action_enter_safe_mode(self, data: TransitionResult | None) -> None:
@@ -359,76 +401,93 @@ class Orchestrator:
 
     async def _process_events(self) -> None:
         """Main event processing loop. Routes events from all sources to FSM."""
+        logger.info("[EVENTS] Event processing loop started")
         while True:
             event_type, event_data = await self.event_queue.get()
+            queue_size = self.event_queue.qsize()
+            logger.info(f"[EVENT] Received: type={event_type}, data={str(event_data)[:100]}, fsm_state={self.fsm.state.name}, queue_remaining={queue_size}")
 
             try:
                 if event_type == "button":
                     if event_data == "press":
+                        logger.info("[EVENT] Hardware button PRESS")
                         await self.fsm.handle_event(Event.BUTTON_PRESS)
                     elif event_data == "long_press":
+                        logger.info("[EVENT] Hardware button LONG_PRESS")
                         await self.fsm.handle_event(Event.BUTTON_LONG_PRESS)
 
                 elif event_type == "ui_button":
-                    # Button press from web UI
                     if event_data == "press":
+                        logger.info("[EVENT] Web UI button PRESS")
                         await self.fsm.handle_event(Event.BUTTON_PRESS)
                     elif event_data == "long_press":
+                        logger.info("[EVENT] Web UI button LONG_PRESS")
                         await self.fsm.handle_event(Event.BUTTON_LONG_PRESS)
 
                 elif event_type == "emergency_key":
+                    logger.warning("[EVENT] EMERGENCY KEY pressed!")
                     await self.fsm.handle_event(Event.EMERGENCY_KEY)
 
                 elif event_type == "emergency_keyword":
+                    logger.warning(f"[EVENT] EMERGENCY KEYWORD detected: {event_data}")
                     await self.fsm.handle_event(
                         Event.EMERGENCY_KEYWORD,
                         TransitionResult(is_emergency=True, metadata=event_data),
                     )
 
                 elif event_type == "vad_start":
+                    logger.info("[EVENT] VAD_START - voice activity detected")
                     await self.fsm.handle_event(Event.VAD_START)
 
                 elif event_type == "vad_end":
+                    logger.info("[EVENT] VAD_END - silence detected, speech segment complete")
                     await self.fsm.handle_event(Event.VAD_END)
 
                 elif event_type == "speech_data":
-                    # Speech data received after VAD_END — trigger processing
-                    pass  # Handled in _action_process_speech via audio_bridge.get_speech_data()
+                    data_len = len(event_data) if event_data else 0
+                    logger.info(f"[EVENT] speech_data received ({data_len} bytes) - handled by process_speech")
 
                 elif event_type == "pipeline_ready":
-                    logger.info("Audio pipeline ready")
+                    logger.info("[EVENT] Audio pipeline READY")
                     self.health.update_status("idle", pipeline="ready")
 
                 elif event_type == "pipeline_error":
-                    logger.error(f"Pipeline error: {event_data}")
+                    logger.error(f"[EVENT] PIPELINE ERROR: {event_data}")
                     if self.fsm.record_crash():
+                        logger.error("[EVENT] Crash loop detected! Entering SAFE_MODE")
                         await self.fsm.handle_event(Event.CRASH_LOOP)
 
                 else:
-                    logger.debug(f"Unknown event: {event_type}")
+                    logger.warning(f"[EVENT] Unknown event type: {event_type}")
 
             except Exception:
-                logger.exception(f"Error processing event {event_type}")
+                logger.exception(f"[EVENT] EXCEPTION processing event '{event_type}'")
                 if self.fsm.record_crash():
+                    logger.error("[EVENT] Crash loop detected after exception! Entering SAFE_MODE")
                     await self.fsm.handle_event(Event.CRASH_LOOP)
 
     async def run(self) -> None:
         """Start all components and run the main event loop."""
-        logger.info("Starting Carely Voice Assistant...")
+        logger.info("[BOOT] Starting Carely Voice Assistant...")
 
-        # Start all services
+        logger.info("[BOOT] Starting UI server...")
         await self.ui_server.start()
+        logger.info("[BOOT] Starting health server...")
         await self.health.start()
+        logger.info("[BOOT] Starting webhook client...")
         await self.webhook.start()
 
+        logger.info("[BOOT] Starting audio bridge...")
         self.audio_bridge.start()
+        logger.info("[BOOT] Starting input handler...")
         self.input_handler.start()
+        logger.info("[BOOT] Starting keyword spotter...")
         self.keyword_spotter.start()
 
         self.health.update_status("idle")
         await self.ui_server.broadcast_state("idle")
 
-        logger.info("All components started. Ready for interaction.")
+        logger.info("[BOOT] All components started. System READY.")
 
         # Run event loop
         try:

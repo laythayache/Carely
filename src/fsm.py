@@ -168,38 +168,48 @@ class FSM:
 
     def new_turn(self) -> str:
         """Create a new turn ID and cancel event. Returns the turn ID."""
+        old_turn = self._current_turn_id
         self._current_turn_id = str(uuid.uuid4())
         self._cancel_event = asyncio.Event()
+        logger.info(f"[FSM] New turn created: {self._current_turn_id} (previous: {old_turn})")
         return self._current_turn_id
 
     def cancel_current_turn(self) -> None:
         """Cancel the current turn by setting the cancel event."""
         if self._cancel_event and not self._cancel_event.is_set():
             self._cancel_event.set()
-            logger.info(f"Cancelled turn {self._current_turn_id}")
+            logger.info(f"[FSM] Turn cancelled: {self._current_turn_id}")
+        else:
+            logger.info(f"[FSM] Turn cleanup (no active cancel_event): {self._current_turn_id}")
         self._current_turn_id = None
         self._cancel_event = None
 
     def is_turn_valid(self, turn_id: str) -> bool:
         """Check if a turn ID matches the current active turn."""
-        return turn_id == self._current_turn_id
+        valid = turn_id == self._current_turn_id
+        if not valid:
+            logger.warning(f"[FSM] Turn validation FAILED: {turn_id} != current {self._current_turn_id}")
+        return valid
 
     def _cancel_timeout(self) -> None:
         """Cancel any pending timeout task."""
         if self._timeout_task and not self._timeout_task.done():
+            logger.debug(f"[FSM] Cancelling pending timeout task")
             self._timeout_task.cancel()
             self._timeout_task = None
 
     def _schedule_timeout(self, seconds: float) -> None:
         """Schedule a TIMEOUT event after the given delay."""
         self._cancel_timeout()
+        logger.info(f"[FSM] Scheduling timeout in {seconds}s for state {self._state.name}")
 
         async def _timeout_fire():
             try:
                 await asyncio.sleep(seconds)
+                logger.warning(f"[FSM] TIMEOUT fired after {seconds}s in state {self._state.name}")
                 await self.handle_event(Event.TIMEOUT)
             except asyncio.CancelledError:
-                pass
+                logger.debug(f"[FSM] Timeout task cancelled (was {seconds}s for {self._state.name})")
 
         self._timeout_task = asyncio.create_task(_timeout_fire())
 
@@ -221,33 +231,37 @@ class FSM:
         Process an event through the FSM.
         Looks up the transition, changes state, notifies listeners, and runs the action.
         """
+        logger.info(f"[FSM] handle_event: {event.name} in state {self._state.name} (turn={self._current_turn_id})")
+
         # Special case: CRASH_LOOP can happen from any state except SAFE_MODE
         if event == Event.CRASH_LOOP and self._state != State.SAFE_MODE:
+            logger.error(f"[FSM] CRASH_LOOP detected in {self._state.name} -> SAFE_MODE")
             await self._transition_to(State.SAFE_MODE, "enter_safe_mode", data)
             return
 
         # Emergency events override any state except SAFE_MODE
         if event in (Event.EMERGENCY_KEYWORD, Event.EMERGENCY_KEY):
             if self._state == State.SAFE_MODE:
-                logger.warning("Ignoring emergency in SAFE_MODE")
+                logger.warning("[FSM] Ignoring emergency in SAFE_MODE")
                 return
             if self._state not in (State.IDLE, State.SPEAKING):
-                # Force cancel current work, then handle emergency
+                logger.warning(f"[FSM] Emergency override: cancelling current work in {self._state.name}")
                 self.cancel_current_turn()
                 self._cancel_timeout()
 
             key = (self._state, event)
             if key not in self._transitions:
-                # Emergency from non-standard state: force to EMERGENCY
+                logger.warning(f"[FSM] Emergency from non-standard state {self._state.name}: forcing to EMERGENCY")
                 await self._transition_to(State.EMERGENCY, "handle_emergency", data)
                 return
 
         key = (self._state, event)
         if key not in self._transitions:
-            logger.debug(f"Ignoring event {event.name} in state {self._state.name}")
+            logger.warning(f"[FSM] No transition for ({self._state.name}, {event.name}) - event IGNORED")
             return
 
         next_state, action_name = self._transitions[key]
+        logger.info(f"[FSM] Transition found: {self._state.name} + {event.name} -> {next_state.name} [{action_name}]")
         await self._transition_to(next_state, action_name, data)
 
     async def _transition_to(
@@ -257,7 +271,7 @@ class FSM:
         prev_state = self._state
         self._state = next_state
 
-        logger.info(f"FSM: {prev_state.name} --> {next_state.name} [{action_name}]")
+        logger.info(f"[FSM] ===== {prev_state.name} --> {next_state.name} [{action_name}] (turn={self._current_turn_id}) =====")
 
         # Cancel timeout on any state change
         self._cancel_timeout()
@@ -275,22 +289,25 @@ class FSM:
             try:
                 await listener(prev_state, next_state)
             except Exception:
-                logger.exception("State listener error")
+                logger.exception(f"[FSM] State listener EXCEPTION during {prev_state.name} -> {next_state.name}")
 
         # Run action callback
         action = self._actions.get(action_name)
         if action:
+            logger.info(f"[FSM] Running action '{action_name}'...")
             try:
                 await action(data)
-            except Exception:
-                logger.exception(f"Action '{action_name}' failed")
+                logger.info(f"[FSM] Action '{action_name}' completed (now in state {self._state.name})")
+            except Exception as e:
+                logger.exception(f"[FSM] ACTION EXCEPTION: '{action_name}' raised {type(e).__name__}: {e}")
                 if next_state not in (State.ERROR, State.SAFE_MODE):
                     error_data = TransitionResult(
-                        error_message=f"Action '{action_name}' failed"
+                        error_message=f"Action '{action_name}' failed: {e}"
                     )
+                    logger.error(f"[FSM] Recovering from action failure - firing TIMEOUT to go to ERROR")
                     await self.handle_event(Event.TIMEOUT, error_data)
         else:
-            logger.debug(f"No action registered for '{action_name}'")
+            logger.warning(f"[FSM] No action registered for '{action_name}'")
 
     def get_valid_events(self) -> list[Event]:
         """Return the list of events valid in the current state."""

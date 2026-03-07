@@ -80,43 +80,52 @@ class TTSEngine:
         ]
 
         try:
-            # Start Piper (text → raw PCM)
+            logger.info(f"[TTS] Launching Piper: {' '.join(piper_cmd)}")
             self._current_process = await asyncio.create_subprocess_exec(
                 *piper_cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            logger.info(f"[TTS] Piper started (PID={self._current_process.pid})")
 
-            # Start pw-play (raw PCM → speaker)
+            logger.info(f"[TTS] Launching pw-play: {' '.join(play_cmd)}")
             self._playback_process = await asyncio.create_subprocess_exec(
                 *play_cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            logger.info(f"[TTS] pw-play started (PID={self._playback_process.pid})")
 
             # Feed text to Piper
             self._current_process.stdin.write(text.encode("utf-8"))
             self._current_process.stdin.close()
+            logger.info(f"[TTS] Fed {len(text)} chars to Piper, streaming PCM to pw-play...")
 
             # Stream PCM from Piper stdout → pw-play stdin + amplitude extraction
             chunk_size = AMPLITUDE_CHUNK_SAMPLES * 2  # 2 bytes per int16 sample
+            total_bytes = 0
+            chunk_count = 0
 
             while True:
                 # Check cancellation
                 if cancel_event and cancel_event.is_set():
-                    logger.info("TTS: Barge-in, stopping playback")
+                    logger.info(f"[TTS] Barge-in detected after {chunk_count} chunks ({total_bytes} bytes)")
                     break
 
                 chunk = await self._current_process.stdout.read(chunk_size)
                 if not chunk:
                     break
 
+                total_bytes += len(chunk)
+                chunk_count += 1
+
                 # Send to playback
                 try:
                     self._playback_process.stdin.write(chunk)
                     await self._playback_process.stdin.drain()
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError) as e:
+                    logger.error(f"[TTS] pw-play pipe broken after {chunk_count} chunks: {e}")
                     break
 
                 # Extract amplitude
@@ -126,10 +135,18 @@ class TTSEngine:
                     amplitude_callback(float(rms))
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
-            logger.info(f"TTS: Playback complete ({latency_ms}ms)")
+            audio_duration_s = total_bytes / (PIPER_SAMPLE_RATE * 2)
+            logger.info(f"[TTS] Playback complete: {total_bytes} bytes ({audio_duration_s:.1f}s audio), {chunk_count} chunks, {latency_ms}ms wall time")
+
+            # Check for Piper stderr
+            if self._current_process.returncode is None:
+                await self._current_process.wait()
+            if self._current_process.returncode != 0:
+                stderr = await self._current_process.stderr.read()
+                logger.error(f"[TTS] Piper exited with code {self._current_process.returncode}: {stderr.decode('utf-8', errors='replace')[:500]}")
 
         except asyncio.CancelledError:
-            logger.info("TTS: Cancelled")
+            logger.warning("[TTS] Cancelled by asyncio")
             raise
 
         finally:
@@ -147,10 +164,12 @@ class TTSEngine:
         ]:
             if proc and proc.returncode is None:
                 try:
+                    logger.info(f"[TTS] Killing {proc_name} (PID={proc.pid})")
                     proc.kill()
                     await proc.wait()
-                except (ProcessLookupError, OSError):
-                    pass
+                    logger.info(f"[TTS] {proc_name} killed (exit={proc.returncode})")
+                except (ProcessLookupError, OSError) as e:
+                    logger.warning(f"[TTS] Failed to kill {proc_name}: {e}")
 
         self._current_process = None
         self._playback_process = None

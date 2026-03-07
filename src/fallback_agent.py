@@ -99,15 +99,21 @@ class FallbackAgent:
         """
         text = transcript.lower().strip()
         if not text:
+            logger.info("[FALLBACK] Empty transcript, no match")
             return None
 
+        logger.info(f"[FALLBACK] Matching '{text}' against {len(INTENTS)} intents...")
         for intent_name, intent in INTENTS.items():
             for pattern in intent["patterns"]:
                 if re.search(pattern, text):
+                    logger.info(f"[FALLBACK] Matched intent='{intent_name}' pattern='{pattern}'")
                     handler = getattr(self, f"_handle_{intent_name}", None)
                     if handler:
-                        return handler(text)
+                        response = handler(text)
+                        logger.info(f"[FALLBACK] Response: '{response.spoken_text[:80]}'")
+                        return response
 
+        logger.info("[FALLBACK] No pattern matched")
         return None
 
     def get_generic_error(self) -> FallbackResponse:

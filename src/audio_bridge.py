@@ -92,6 +92,7 @@ class AudioBridge:
 
     def send_start_capture(self) -> None:
         """Tell C++ to start VAD-monitored capture."""
+        logger.info("[AUDIO] Sending START_CAPTURE to C++ pipeline")
         self._speech_buffer.clear()
         self._collecting_speech = False
         self._speech_ready.clear()
@@ -99,6 +100,7 @@ class AudioBridge:
 
     def send_stop_capture(self) -> None:
         """Tell C++ to stop capture."""
+        logger.info(f"[AUDIO] Sending STOP_CAPTURE to C++ pipeline (buffer={len(self._speech_buffer)} bytes)")
         self._collecting_speech = False
         self._send_command(CMD_STOP_CAPTURE)
 
@@ -113,18 +115,25 @@ class AudioBridge:
         after VAD_END (fixes race condition between VAD_END event and
         the subsequent AUDIO_FRAME containing speech data).
         """
-        self._speech_ready.wait(timeout=timeout)
+        logger.info(f"[AUDIO] Waiting for speech data (timeout={timeout}s, buffer={len(self._speech_buffer)} bytes)...")
+        ready = self._speech_ready.wait(timeout=timeout)
+        if not ready:
+            logger.warning(f"[AUDIO] Speech data wait TIMED OUT after {timeout}s")
+        else:
+            logger.info(f"[AUDIO] Speech data ready: {len(self._speech_buffer)} bytes ({len(self._speech_buffer) / 32000:.1f}s of audio)")
         return bytes(self._speech_buffer)
 
     def _send_command(self, cmd: int, payload: bytes = b"") -> None:
         """Send a command to the C++ pipeline."""
         if not self._sock:
+            logger.warning(f"[AUDIO] Cannot send command 0x{cmd:02x} - socket not connected")
             return
         try:
             header = struct.pack("<BL", cmd, len(payload))
             self._sock.sendall(header + payload)
+            logger.debug(f"[AUDIO] Sent command 0x{cmd:02x} ({len(payload)} bytes payload)")
         except OSError as e:
-            logger.error(f"Failed to send command 0x{cmd:02x}: {e}")
+            logger.error(f"[AUDIO] Failed to send command 0x{cmd:02x}: {e}")
 
     def _connect_and_read(self) -> None:
         """Thread target: connect to socket and read messages."""
@@ -132,19 +141,19 @@ class AudioBridge:
             try:
                 self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 self._sock.settimeout(2.0)
-                logger.info(f"Connecting to audio pipeline at {self.socket_path}")
+                logger.info(f"[AUDIO] Connecting to audio pipeline at {self.socket_path}")
                 self._sock.connect(self.socket_path)
                 self._sock.settimeout(None)
-                logger.info("Connected to audio pipeline")
+                logger.info("[AUDIO] Connected to audio pipeline")
                 self._read_loop()
             except (ConnectionRefusedError, FileNotFoundError):
                 if self._running:
-                    logger.debug("Audio pipeline not ready, retrying in 1s...")
+                    logger.debug("[AUDIO] Pipeline not ready, retrying in 1s...")
                     import time
                     time.sleep(1.0)
             except OSError as e:
                 if self._running:
-                    logger.error(f"Audio bridge error: {e}, reconnecting in 1s...")
+                    logger.error(f"[AUDIO] Bridge error: {e}, reconnecting in 1s...")
                     import time
                     time.sleep(1.0)
             finally:
@@ -191,21 +200,22 @@ class AudioBridge:
     def _handle_message(self, msg_type: int, payload: bytes) -> None:
         """Dispatch received messages."""
         if msg_type == MSG_AUDIO_FRAME:
-            # During speech collection, this is the full speech data after VAD_END
             if self._collecting_speech:
                 self._speech_buffer.extend(payload)
+                logger.info(f"[AUDIO] Speech frame received: {len(payload)} bytes, total buffer={len(self._speech_buffer)} bytes")
                 self._collecting_speech = False
-                self._speech_ready.set()  # Signal that speech data is available
+                self._speech_ready.set()
                 self._emit_event("speech_data", bytes(self._speech_buffer))
             elif self._audio_frame_callback:
                 self._audio_frame_callback(payload)
 
         elif msg_type == MSG_VAD_START:
+            logger.info("[AUDIO] VAD_START received from C++ pipeline")
             self._speech_buffer.clear()
             self._emit_event("vad_start", None)
 
         elif msg_type == MSG_VAD_END:
-            # Next AUDIO_FRAME message will contain the full speech data
+            logger.info(f"[AUDIO] VAD_END received from C++ pipeline (buffer so far={len(self._speech_buffer)} bytes)")
             self._collecting_speech = True
             self._emit_event("vad_end", None)
 
@@ -216,13 +226,16 @@ class AudioBridge:
                     self._amplitude_callback(amplitude)
 
         elif msg_type == MSG_PIPELINE_READY:
-            logger.info("Audio pipeline reports READY")
+            logger.info("[AUDIO] Pipeline reports READY")
             self._emit_event("pipeline_ready", None)
 
         elif msg_type == MSG_PIPELINE_ERROR:
             error_msg = payload.decode("utf-8", errors="replace")
-            logger.error(f"Audio pipeline error: {error_msg}")
+            logger.error(f"[AUDIO] Pipeline ERROR: {error_msg}")
             self._emit_event("pipeline_error", error_msg)
+
+        else:
+            logger.warning(f"[AUDIO] Unknown message type: 0x{msg_type:02x} ({len(payload)} bytes)")
 
     def _emit_event(self, event_type: str, data: Any) -> None:
         """Thread-safe emit to the asyncio event queue."""

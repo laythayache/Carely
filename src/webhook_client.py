@@ -114,7 +114,7 @@ class WebhookClient:
             headers["Authorization"] = f"Bearer {self.auth_token}"
 
         self._session = aiohttp.ClientSession(timeout=timeout, headers=headers)
-        logger.info(f"Webhook client ready: {self.url}")
+        logger.info(f"[WEBHOOK] Client ready: url={self.url}, timeout={self.timeout_s}s, max_retries={self.max_retries}")
 
     async def stop(self) -> None:
         """Close the HTTP session."""
@@ -139,6 +139,7 @@ class WebhookClient:
             WebhookUnavailableError: If all retries fail
             asyncio.CancelledError: If cancel_event is set
         """
+        logger.info(f"[WEBHOOK] Preparing turn request: turn={turn_id}, lang={language}, transcript='{transcript[:80]}'")
         request = WebhookRequest(
             device_id=self.device_id,
             turn_id=turn_id,
@@ -152,8 +153,10 @@ class WebhookClient:
         # Validate outgoing request
         try:
             jsonschema.validate(request.to_dict(), REQUEST_SCHEMA)
+            logger.debug(f"[WEBHOOK] Request validation passed")
         except jsonschema.ValidationError as e:
-            logger.error(f"Request validation failed: {e.message}")
+            logger.error(f"[WEBHOOK] Request validation FAILED: {e.message}")
+            logger.error(f"[WEBHOOK] Request data: {request.to_dict()}")
             raise
 
         return await self._send_with_retry(request, cancel_event)
@@ -186,62 +189,82 @@ class WebhookClient:
     ) -> WebhookResponse:
         """Send request with exponential backoff retry logic."""
         if not self._session:
+            logger.error("[WEBHOOK] Cannot send - client not started!")
             raise RuntimeError("WebhookClient not started")
 
         retries = max_retries if max_retries is not None else self.max_retries
         last_error: Exception | None = None
+        import time as _time
+        total_start = _time.monotonic()
 
         for attempt in range(retries + 1):
             # Check cancellation
             if cancel_event and cancel_event.is_set():
+                logger.warning("[WEBHOOK] Cancelled before attempt")
                 raise asyncio.CancelledError("Webhook cancelled")
+
+            attempt_start = _time.monotonic()
+            logger.info(f"[WEBHOOK] POST {self.url} (attempt {attempt + 1}/{retries + 1}, turn={request.turn_id})")
 
             try:
                 async with self._session.post(
                     self.url, json=request.to_dict()
                 ) as resp:
+                    elapsed = int((_time.monotonic() - attempt_start) * 1000)
                     if resp.status == 200:
                         data = await resp.json()
-                        return self._parse_response(data)
+                        logger.info(f"[WEBHOOK] 200 OK in {elapsed}ms, parsing response...")
+                        logger.debug(f"[WEBHOOK] Raw response: {str(data)[:500]}")
+                        result = self._parse_response(data)
+                        logger.info(f"[WEBHOOK] Parsed: spoken_text='{(result.spoken_text or '')[:80]}', lang={result.language}")
+                        return result
                     elif resp.status >= 500:
                         body = await resp.text()
                         last_error = RuntimeError(
                             f"Webhook returned {resp.status}: {body[:200]}"
                         )
-                        logger.warning(
-                            f"Webhook {resp.status} (attempt {attempt + 1}/{retries + 1})"
+                        logger.error(
+                            f"[WEBHOOK] SERVER ERROR {resp.status} in {elapsed}ms (attempt {attempt + 1}/{retries + 1}): {body[:200]}"
                         )
                     else:
                         body = await resp.text()
+                        logger.error(
+                            f"[WEBHOOK] HTTP {resp.status} in {elapsed}ms: {body[:200]}"
+                        )
                         raise RuntimeError(
                             f"Webhook returned {resp.status}: {body[:200]}"
                         )
 
             except aiohttp.ClientError as e:
+                elapsed = int((_time.monotonic() - attempt_start) * 1000)
                 last_error = e
-                logger.warning(
-                    f"Webhook error (attempt {attempt + 1}/{retries + 1}): {e}"
+                logger.error(
+                    f"[WEBHOOK] CONNECTION ERROR in {elapsed}ms (attempt {attempt + 1}/{retries + 1}): {type(e).__name__}: {e}"
                 )
             except asyncio.TimeoutError:
+                elapsed = int((_time.monotonic() - attempt_start) * 1000)
                 last_error = asyncio.TimeoutError("Webhook timeout")
-                logger.warning(
-                    f"Webhook timeout (attempt {attempt + 1}/{retries + 1})"
+                logger.error(
+                    f"[WEBHOOK] TIMEOUT after {elapsed}ms (attempt {attempt + 1}/{retries + 1}, limit={self.timeout_s}s)"
                 )
 
             # Backoff before retry (if not last attempt)
             if attempt < retries:
                 backoff_s = (self.retry_backoff_ms * (2 ** attempt)) / 1000.0
-                logger.debug(f"Retrying in {backoff_s:.1f}s...")
+                logger.info(f"[WEBHOOK] Retrying in {backoff_s:.1f}s...")
 
                 if cancel_event:
                     try:
                         await asyncio.wait_for(cancel_event.wait(), timeout=backoff_s)
+                        logger.warning("[WEBHOOK] Cancelled during backoff")
                         raise asyncio.CancelledError("Webhook cancelled during backoff")
                     except asyncio.TimeoutError:
                         pass  # Backoff complete, retry
                 else:
                     await asyncio.sleep(backoff_s)
 
+        total_elapsed = int((_time.monotonic() - total_start) * 1000)
+        logger.error(f"[WEBHOOK] ALL ATTEMPTS FAILED after {total_elapsed}ms ({retries + 1} attempts): {last_error}")
         raise WebhookUnavailableError(
             f"Webhook failed after {retries + 1} attempts: {last_error}"
         )
@@ -251,8 +274,8 @@ class WebhookClient:
         try:
             jsonschema.validate(data, RESPONSE_SCHEMA)
         except jsonschema.ValidationError as e:
-            logger.error(f"Response validation failed: {e.message}")
-            logger.debug(f"Response data: {data}")
+            logger.error(f"[WEBHOOK] Response validation FAILED: {e.message}")
+            logger.error(f"[WEBHOOK] Bad response data: {data}")
             raise
 
         return WebhookResponse(

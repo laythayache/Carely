@@ -84,10 +84,12 @@ class InputHandler:
                 try:
                     if key == listen_key and self._press_time is None:
                         self._press_time = time.monotonic()
+                        logger.info(f"[INPUT] Button key DOWN ({self.button_key})")
                     elif key == emerg_key:
+                        logger.warning(f"[INPUT] EMERGENCY key pressed ({self.emergency_key})")
                         self._emit("emergency_key", {})
                 except Exception:
-                    logger.exception("Error in on_press")
+                    logger.exception("[INPUT] Error in on_press")
 
             def on_release(key):
                 if not self._running:
@@ -98,11 +100,13 @@ class InputHandler:
                         self._press_time = None
 
                         if duration_ms >= self.long_press_ms:
+                            logger.info(f"[INPUT] Button LONG_PRESS ({duration_ms:.0f}ms >= {self.long_press_ms}ms)")
                             self._emit("button", "long_press")
                         else:
+                            logger.info(f"[INPUT] Button PRESS ({duration_ms:.0f}ms)")
                             self._emit("button", "press")
                 except Exception:
-                    logger.exception("Error in on_release")
+                    logger.exception("[INPUT] Error in on_release")
 
             with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
                 listener.join()

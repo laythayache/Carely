@@ -66,9 +66,12 @@ class STTEngine:
             RuntimeError: If whisper.cpp fails
         """
         start_time = time.monotonic()
+        audio_duration_s = len(pcm_data) / (SAMPLE_RATE * SAMPLE_WIDTH)
+        logger.info(f"[STT] Transcribing {len(pcm_data)} bytes ({audio_duration_s:.1f}s audio), lang={self.language}, threads={self.threads}")
 
         # Write PCM data to a temporary WAV file
         wav_path = await self._write_wav(pcm_data)
+        logger.info(f"[STT] WAV file written: {wav_path}")
 
         try:
             # Build whisper.cpp command
@@ -82,13 +85,14 @@ class STTEngine:
                 "--file", str(wav_path),
             ]
 
-            logger.debug(f"Running whisper.cpp: {' '.join(cmd)}")
+            logger.info(f"[STT] Running: {' '.join(cmd)}")
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            logger.info(f"[STT] whisper.cpp started (PID={proc.pid})")
 
             # Wait for completion with cancellation support
             if cancel_event:
@@ -104,7 +108,7 @@ class STTEngine:
                     task.cancel()
 
                 if cancel_task in done:
-                    # Cancelled — kill the process
+                    logger.warning(f"[STT] Cancelled - killing whisper.cpp (PID={proc.pid})")
                     proc.kill()
                     await proc.wait()
                     raise asyncio.CancelledError("STT cancelled")
@@ -113,9 +117,14 @@ class STTEngine:
             else:
                 stdout, stderr = await proc.communicate()
 
+            elapsed_ms = int((time.monotonic() - start_time) * 1000)
+
             if proc.returncode != 0:
                 error_msg = stderr.decode("utf-8", errors="replace").strip()
+                logger.error(f"[STT] whisper.cpp FAILED (code {proc.returncode}) after {elapsed_ms}ms: {error_msg}")
                 raise RuntimeError(f"whisper.cpp failed (code {proc.returncode}): {error_msg}")
+
+            logger.info(f"[STT] whisper.cpp finished in {elapsed_ms}ms (exit=0)")
 
             # Parse JSON output
             result = self._parse_output(stdout.decode("utf-8", errors="replace"), wav_path)
@@ -123,9 +132,9 @@ class STTEngine:
             latency_ms = int((time.monotonic() - start_time) * 1000)
             result.latency_ms = latency_ms
             logger.info(
-                f"STT: '{result.text[:80]}' "
+                f"[STT] Result: '{result.text}' "
                 f"[lang={result.language}, conf={result.language_confidence:.2f}, "
-                f"latency={latency_ms}ms]"
+                f"segments={len(result.segments)}, latency={latency_ms}ms]"
             )
             return result
 
@@ -133,11 +142,11 @@ class STTEngine:
             # Cleanup temp file
             try:
                 wav_path.unlink(missing_ok=True)
-                # Also clean up the .json output file whisper.cpp creates
                 json_path = wav_path.with_suffix(".wav.json")
                 json_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+                logger.debug(f"[STT] Cleaned up temp files: {wav_path}")
+            except OSError as e:
+                logger.warning(f"[STT] Failed to clean temp files: {e}")
 
     async def _write_wav(self, pcm_data: bytes) -> Path:
         """Write PCM data to a temporary WAV file."""

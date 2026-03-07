@@ -88,14 +88,17 @@ class UIServer:
     async def _handle_ws_message(self, data: dict[str, Any]) -> None:
         """Process incoming WebSocket messages (button presses from UI)."""
         msg_type = data.get("type")
+        logger.info(f"[UI] Received WS message: {data}")
         if msg_type == "button":
             action = data.get("action", "press")
+            logger.info(f"[UI] Button event from web UI: action={action}")
             await self.event_queue.put(("ui_button", action))
         else:
-            logger.debug(f"Unknown WebSocket message type: {msg_type}")
+            logger.warning(f"[UI] Unknown WebSocket message type: {msg_type}")
 
     async def broadcast_state(self, state: str, message: str = "") -> None:
         """Send state update to all connected WebSocket clients."""
+        logger.info(f"[UI] Broadcasting state='{state}' to {len(self._ws_clients)} clients")
         await self._broadcast({"type": "state", "state": state, "message": message})
 
     async def broadcast_amplitude(self, value: float) -> None:
@@ -104,14 +107,17 @@ class UIServer:
 
     async def broadcast_transcript(self, text: str, language: str = "") -> None:
         """Send transcript text to all connected WebSocket clients."""
+        logger.info(f"[UI] Broadcasting transcript: '{text[:80]}' lang={language} to {len(self._ws_clients)} clients")
         await self._broadcast({"type": "transcript", "text": text, "language": language})
 
     async def broadcast_response(self, text: str, language: str = "") -> None:
         """Send AI response text to all connected WebSocket clients."""
+        logger.info(f"[UI] Broadcasting response: '{text[:80]}' lang={language} to {len(self._ws_clients)} clients")
         await self._broadcast({"type": "response", "text": text, "language": language})
 
     async def broadcast_error(self, message: str, code: str = "") -> None:
         """Send error message to all connected WebSocket clients."""
+        logger.error(f"[UI] Broadcasting error: '{message}' code={code} to {len(self._ws_clients)} clients")
         await self._broadcast({"type": "error", "message": message, "code": code})
 
     async def _broadcast(self, data: dict[str, Any]) -> None:
