@@ -16,6 +16,7 @@ class CarelyWSClient {
             state: [],
             amplitude: [],
             transcript: [],
+            response: [],
             error: [],
             connected: [],
             disconnected: [],
@@ -72,6 +73,9 @@ class CarelyWSClient {
                 break;
             case 'transcript':
                 this._emit('transcript', msg.text, msg.language || '');
+                break;
+            case 'response':
+                this._emit('response', msg.text, msg.language || '');
                 break;
             case 'error':
                 this._emit('error', msg.message, msg.code || '');

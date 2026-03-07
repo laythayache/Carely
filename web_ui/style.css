@@ -55,6 +55,18 @@ body {
     transition: opacity 0.3s ease;
 }
 
+#response-text {
+    font-size: 1rem;
+    font-weight: 400;
+    max-width: 80%;
+    text-align: center;
+    opacity: 0;
+    min-height: 2em;
+    overflow: hidden;
+    color: #90CAF9;
+    transition: opacity 0.3s ease;
+}
+
 #main-button {
     position: fixed;
     bottom: 3rem;

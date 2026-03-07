@@ -197,6 +197,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const orb = new OrbRenderer('orb-canvas');
     const statusEl = document.getElementById('status-text');
     const transcriptEl = document.getElementById('transcript-text');
+    const responseEl = document.getElementById('response-text');
     const mainButton = document.getElementById('main-button');
     const ws = window.carelyWS;
 
@@ -226,6 +227,12 @@ document.addEventListener('DOMContentLoaded', () => {
     ws.on('transcript', (text) => {
         transcriptEl.textContent = text;
         transcriptEl.style.opacity = text ? '0.7' : '0.5';
+        if (text) responseEl.textContent = '';
+    });
+
+    ws.on('response', (text) => {
+        responseEl.textContent = text;
+        responseEl.style.opacity = text ? '1' : '0';
     });
 
     ws.on('error', (message) => {

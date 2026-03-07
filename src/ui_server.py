@@ -106,6 +106,10 @@ class UIServer:
         """Send transcript text to all connected WebSocket clients."""
         await self._broadcast({"type": "transcript", "text": text, "language": language})
 
+    async def broadcast_response(self, text: str, language: str = "") -> None:
+        """Send AI response text to all connected WebSocket clients."""
+        await self._broadcast({"type": "response", "text": text, "language": language})
+
     async def broadcast_error(self, message: str, code: str = "") -> None:
         """Send error message to all connected WebSocket clients."""
         await self._broadcast({"type": "error", "message": message, "code": code})

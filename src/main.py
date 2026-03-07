@@ -248,6 +248,8 @@ class Orchestrator:
             await self.fsm.handle_event(Event.TTS_COMPLETE)
             return
 
+        await self.ui_server.broadcast_response(data.spoken_text, data.voice_language or "en")
+
         try:
             def amplitude_cb(val: float) -> None:
                 try:
