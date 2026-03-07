@@ -33,11 +33,12 @@ public:
     static constexpr int CHANNELS = 1;
     static constexpr int FRAME_SIZE_SAMPLES = 160;  // 10ms at 16kHz
 
-private:
+    // PipeWire callbacks (must be public for C-style struct initialization)
     static void on_process(void* userdata);
     static void on_stream_state_changed(void* userdata, enum pw_stream_state old,
                                          enum pw_stream_state state, const char* error);
 
+private:
     AudioRingBuffer& ring_buffer_;
     std::string device_name_;
     std::atomic<bool> running_{false};

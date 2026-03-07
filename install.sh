@@ -65,14 +65,15 @@ setup_user() {
     fi
     sudo mkdir -p "$INSTALL_DIR" "$MODEL_DIR/whisper" "$MODEL_DIR/piper" "$BIN_DIR"
     sudo mkdir -p /var/log/carely
+    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
     sudo chown -R "$SERVICE_USER:$SERVICE_USER" /var/log/carely
 }
 
 # ── Step 3: Clone or Update Repository ──────────────────────
 setup_repo() {
     step "Setting up repository"
-    # Tell git to trust this directory (avoids "dubious ownership" error)
-    git config --global --add safe.directory "$INSTALL_DIR"
+    sudo mkdir -p "$INSTALL_DIR"
+    sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
     if [ -d "$INSTALL_DIR/.git" ]; then
         log "Repository exists, pulling latest..."
         sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" pull origin main

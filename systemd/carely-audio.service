@@ -1,7 +1,7 @@
 [Unit]
 Description=Carely Audio Pipeline (C++)
-After=pipewire.service
-Requires=pipewire.service
+After=sound.target
+Wants=sound.target
 
 [Service]
 Type=simple
@@ -12,7 +12,7 @@ StartLimitBurst=5
 StartLimitIntervalSec=300
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 EnvironmentFile=/opt/assistant/.env
-User=carely
+User=hp
 Group=audio
 RuntimeDirectory=carely
 RuntimeDirectoryMode=0755

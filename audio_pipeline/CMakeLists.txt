@@ -9,8 +9,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
 
-# Find WebRTC Audio Processing
-pkg_check_modules(WEBRTC_APM REQUIRED webrtc-audio-processing-1)
+# Find WebRTC Audio Processing (Ubuntu 24.04 uses webrtc-audio-processing)
+pkg_check_modules(WEBRTC_APM REQUIRED webrtc-audio-processing)
 
 # Source files
 # amplitude_calc.h is header-only (no .cpp)
