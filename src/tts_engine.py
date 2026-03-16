@@ -31,12 +31,54 @@ class TTSEngine:
         binary_path: str,
         voice_paths: dict[str, str],
         default_language: str = "en",
+        output_device: str = "default",
     ):
         self.binary_path = binary_path
         self.voice_paths = voice_paths  # {"en": "/path/to.onnx", "ar": "/path/to.onnx"}
         self.default_language = default_language
+        self.output_device = output_device  # PipeWire device name
         self._current_process: asyncio.subprocess.Process | None = None
         self._playback_process: asyncio.subprocess.Process | None = None
+
+    def _resolve_language(self, language: str) -> str:
+        """Resolve incoming language hint to available voice key (e.g. en/ar)."""
+        normalized = (language or "").strip().lower()
+
+        if normalized in self.voice_paths:
+            return normalized
+
+        # Common language labels/codes from STT/webhooks
+        alias_map = {
+            "arabic": "ar",
+            "ara": "ar",
+            "ar-sa": "ar",
+            "ar_jo": "ar",
+            "ar-jo": "ar",
+            "english": "en",
+            "eng": "en",
+            "en-us": "en",
+            "en-gb": "en",
+            "en_us": "en",
+            "en_gb": "en",
+        }
+        if normalized in alias_map and alias_map[normalized] in self.voice_paths:
+            return alias_map[normalized]
+
+        # Generic BCP-47 / locale formats: ar-JO, en_US, etc.
+        if "-" in normalized:
+            primary = normalized.split("-", 1)[0]
+            if primary in self.voice_paths:
+                return primary
+        if "_" in normalized:
+            primary = normalized.split("_", 1)[0]
+            if primary in self.voice_paths:
+                return primary
+
+        if self.default_language in self.voice_paths:
+            return self.default_language
+
+        # Last resort: first configured voice key
+        return next(iter(self.voice_paths.keys()))
 
     async def speak(
         self,
@@ -54,7 +96,7 @@ class TTSEngine:
             cancel_event: Set to stop playback (barge-in)
             amplitude_callback: Called with RMS amplitude per ~20ms chunk
         """
-        lang = language if language in self.voice_paths else self.default_language
+        lang = self._resolve_language(language)
         voice_path = self.voice_paths[lang]
         config_path = voice_path + ".json"
 
@@ -76,8 +118,13 @@ class TTSEngine:
             "--rate", str(PIPER_SAMPLE_RATE),
             "--channels", str(PIPER_CHANNELS),
             "--format", "s16",
-            "-",
         ]
+        
+        # Add device if specified (not "default")
+        if self.output_device and self.output_device.lower() != "default":
+            play_cmd.extend(["--target", self.output_device])
+        
+        play_cmd.append("-")
 
         try:
             logger.info(f"[TTS] Launching Piper: {' '.join(piper_cmd)}")

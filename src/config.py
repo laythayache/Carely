@@ -1,13 +1,27 @@
 """
 Carely device configuration loader and validator.
-Reads from .env file using python-dotenv, validates all fields.
+Reads from .env file, validates all fields.
 """
 
 import os
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from dotenv import load_dotenv
+
+# Simple .env loader (no external dependency)
+def load_dotenv(dotenv_path=None):
+    """Load .env file into os.environ"""
+    if dotenv_path is None:
+        dotenv_path = Path('.env')
+    else:
+        dotenv_path = Path(dotenv_path)
+    
+    if dotenv_path.exists():
+        for line in dotenv_path.read_text().splitlines():
+            s = line.strip()
+            if s and not s.startswith('#') and '=' in s:
+                k, v = s.split('=', 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
 logger = logging.getLogger(__name__)
 

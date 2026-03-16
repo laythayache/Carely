@@ -66,6 +66,7 @@ class Orchestrator:
                 "ar": config.piper_voice_ar,
             },
             default_language=config.piper_default_voice,
+            output_device=config.audio_output_device,
         )
         self.webhook = WebhookClient(
             url=config.webhook_url,
