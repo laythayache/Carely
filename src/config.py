@@ -64,6 +64,8 @@ class Config:
     # UI
     ui_host: str = "0.0.0.0"
     ui_port: int = 8080
+    button_api_enabled: bool = False
+    button_api_bearer_token: str = ""
 
     # Logging
     log_level: str = "INFO"
@@ -150,6 +152,8 @@ def load_config(env_path: str | Path | None = None) -> Config:
         long_press_ms=_get_env_int("LONG_PRESS_MS", Config.long_press_ms),
         ui_host=_get_env("UI_HOST", Config.ui_host),
         ui_port=_get_env_int("UI_PORT", Config.ui_port),
+        button_api_enabled=_get_env_bool("BUTTON_API_ENABLED", Config.button_api_enabled),
+        button_api_bearer_token=_get_env("BUTTON_API_BEARER_TOKEN", Config.button_api_bearer_token),
         log_level=_get_env("LOG_LEVEL", Config.log_level),
         log_file=_get_env("LOG_FILE", Config.log_file),
         health_port=_get_env_int("HEALTH_PORT", Config.health_port),
@@ -205,6 +209,9 @@ def validate_config(config: Config) -> None:
 
     if config.ui_port < 1 or config.ui_port > 65535:
         errors.append(f"UI_PORT must be 1-65535, got: {config.ui_port}")
+
+    if config.button_api_enabled and not config.button_api_bearer_token.strip():
+        errors.append("BUTTON_API_BEARER_TOKEN must not be empty when BUTTON_API_ENABLED=true")
 
     if config.health_port < 1 or config.health_port > 65535:
         errors.append(f"HEALTH_PORT must be 1-65535, got: {config.health_port}")

@@ -71,6 +71,15 @@ class TestConfigValidation:
         with pytest.raises(ConfigError, match="LONG_PRESS_MS"):
             validate_config(config)
 
+    def test_button_api_enabled_requires_token(self):
+        config = Config(button_api_enabled=True, button_api_bearer_token="")
+        with pytest.raises(ConfigError, match="BUTTON_API_BEARER_TOKEN"):
+            validate_config(config)
+
+    def test_button_api_enabled_with_token_is_valid(self):
+        config = Config(button_api_enabled=True, button_api_bearer_token="secret-token")
+        validate_config(config)
+
 
 class TestConfigLoading:
     def test_load_from_env_file(self, test_env):

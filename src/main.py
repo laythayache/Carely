@@ -93,6 +93,8 @@ class Orchestrator:
             host=config.ui_host,
             port=config.ui_port,
             event_queue=self.event_queue,
+            button_api_enabled=config.button_api_enabled,
+            button_api_bearer_token=config.button_api_bearer_token,
         )
         self.health = HealthServer(
             port=config.health_port,

@@ -138,6 +138,15 @@ nano /opt/assistant/.env
 **Required setting — update at minimum:**
 - `WEBHOOK_URL` — the URL of your n8n/webhook endpoint
 
+**Hardware button over Wi-Fi (Carely-Button integration):**
+- `BUTTON_API_ENABLED=true`
+- `BUTTON_API_BEARER_TOKEN=<strong-random-token>`
+
+When enabled, Carely accepts authenticated LAN button presses at:
+- `POST http://<carely-ip>:<UI_PORT>/button`
+- Header: `Authorization: Bearer <BUTTON_API_BEARER_TOKEN>`
+- JSON body: `{"action":"press"}` (legacy `{"event":"button_press"}` also accepted)
+
 All available settings are documented in `.env.example`.
 
 ---

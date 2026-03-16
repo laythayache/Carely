@@ -24,10 +24,19 @@ class UIServer:
     - Accepts button press events from the UI
     """
 
-    def __init__(self, host: str, port: int, event_queue: asyncio.Queue):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        event_queue: asyncio.Queue,
+        button_api_enabled: bool = False,
+        button_api_bearer_token: str = "",
+    ):
         self.host = host
         self.port = port
         self.event_queue = event_queue
+        self.button_api_enabled = button_api_enabled
+        self.button_api_bearer_token = button_api_bearer_token
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
@@ -36,6 +45,7 @@ class UIServer:
         """Start the HTTP/WebSocket server."""
         self._app = web.Application()
         self._app.router.add_get("/ws", self._ws_handler)
+        self._app.router.add_post("/button", self._button_handler)
         # Static files: serve index.html at root, other files by name
         self._app.router.add_get("/", self._index_handler)
         self._app.router.add_static("/", WEB_UI_DIR, show_index=False)
@@ -60,6 +70,45 @@ class UIServer:
     async def _index_handler(self, request: web.Request) -> web.FileResponse:
         """Serve index.html."""
         return web.FileResponse(WEB_UI_DIR / "index.html")
+
+    async def _button_handler(self, request: web.Request) -> web.Response:
+        """Handle authenticated HTTP button triggers from hardware devices."""
+        if not self.button_api_enabled:
+            return web.json_response({"error": "button_api_disabled"}, status=404)
+
+        if not self._is_authorized(request.headers.get("Authorization", "")):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        try:
+            data = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return web.json_response({"error": "invalid_json"}, status=400)
+
+        accepted = await self._handle_button_payload(data)
+        if not accepted:
+            return web.json_response({"error": "invalid_button_event"}, status=400)
+
+        return web.json_response({"status": "ok"})
+
+    def _is_authorized(self, authorization_header: str) -> bool:
+        if not self.button_api_bearer_token:
+            return False
+        expected = f"Bearer {self.button_api_bearer_token}"
+        return authorization_header.strip() == expected
+
+    async def _handle_button_payload(self, data: dict[str, Any]) -> bool:
+        """Validate payload and enqueue a hardware button press event."""
+        if not isinstance(data, dict):
+            return False
+
+        action = data.get("action")
+        event = data.get("event")
+        if action == "press" or event == "button_press":
+            await self.event_queue.put(("button", "press"))
+            logger.info("[BUTTON] Hardware button event accepted over HTTP")
+            return True
+
+        return False
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         """Handle WebSocket connections."""
