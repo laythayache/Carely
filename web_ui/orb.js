@@ -199,7 +199,30 @@ document.addEventListener('DOMContentLoaded', () => {
     const transcriptEl = document.getElementById('transcript-text');
     const responseEl = document.getElementById('response-text');
     const mainButton = document.getElementById('main-button');
+    const debugLog = document.getElementById('debug-log');
+    const debugClear = document.getElementById('debug-clear');
     const ws = window.carelyWS;
+
+    // Debug logging helper
+    function logDebug(msg, level = 'info') {
+        const now = new Date();
+        const time = now.toLocaleTimeString('en-US', { hour12: false }) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+        const entry = document.createElement('div');
+        entry.className = `log-entry ${level}`;
+        entry.innerHTML = `<span class="log-time">${time}</span><span class="log-msg">${msg}</span>`;
+        debugLog.appendChild(entry);
+        debugLog.scrollTop = debugLog.scrollHeight;
+        // Also log to browser console
+        console.log(`[${time}] [${level.toUpperCase()}] ${msg}`);
+    }
+
+    // Clear button
+    debugClear.addEventListener('click', () => {
+        debugLog.innerHTML = '';
+        logDebug('Console cleared', 'info');
+    });
+
+    logDebug('Carely UI initialized', 'info');
 
     const STATUS_TEXT = {
         idle: 'Ready',
@@ -213,6 +236,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Wire WebSocket events to orb
     ws.on('state', (state, message) => {
+        logDebug(`State: ${state}${message ? ' - ' + message : ''}`, 'state');
         orb.setState(state);
         statusEl.textContent = message || STATUS_TEXT[state] || '';
         mainButton.className = '';
@@ -225,27 +249,35 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     ws.on('transcript', (text) => {
+        if (text) logDebug(`Transcript: "${text}"`, 'info');
         transcriptEl.textContent = text;
         transcriptEl.style.opacity = text ? '0.7' : '0.5';
         if (text) responseEl.textContent = '';
     });
 
     ws.on('response', (text) => {
+        if (text) logDebug(`Response: "${text}"`, 'info');
         responseEl.textContent = text;
         responseEl.style.opacity = text ? '1' : '0';
     });
 
-    ws.on('error', (message) => {
+    ws.on('error', (message, code) => {
+        logDebug(`ERROR: ${message}${code ? ' (code: ' + code + ')' : ''}`, 'error');
         statusEl.textContent = message;
     });
 
     ws.on('connected', () => {
-        console.log('Connected to Carely backend');
+        logDebug('Connected to Carely backend', 'info');
     });
 
     ws.on('disconnected', () => {
+        logDebug('Disconnected from backend - reconnecting...', 'warn');
         statusEl.textContent = 'Reconnecting...';
         orb.setState('error');
+    });
+
+    ws.on('log', (message, level) => {
+        logDebug(`[Backend] ${message}`, level);
     });
 
     // Button press handling (with long-press detection)
@@ -264,8 +296,10 @@ document.addEventListener('DOMContentLoaded', () => {
         pressStart = null;
 
         if (duration >= LONG_PRESS_MS) {
+            logDebug('Button LONG PRESS - sending emergency/cancel', 'warn');
             ws.sendButtonLongPress();
         } else {
+            logDebug('Button PRESS - starting listening...', 'info');
             ws.sendButtonPress();
         }
     });
@@ -290,8 +324,10 @@ document.addEventListener('DOMContentLoaded', () => {
             keyPressStart = null;
 
             if (duration >= LONG_PRESS_MS) {
+                logDebug('Spacebar LONG PRESS - sending emergency/cancel', 'warn');
                 ws.sendButtonLongPress();
             } else {
+                logDebug('Spacebar PRESS - starting listening...', 'info');
                 ws.sendButtonPress();
             }
         }

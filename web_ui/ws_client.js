@@ -18,6 +18,7 @@ class CarelyWSClient {
             transcript: [],
             response: [],
             error: [],
+            log: [],
             connected: [],
             disconnected: [],
         };
@@ -79,6 +80,9 @@ class CarelyWSClient {
                 break;
             case 'error':
                 this._emit('error', msg.message, msg.code || '');
+                break;
+            case 'log':
+                this._emit('log', msg.message, msg.level || 'info');
                 break;
             default:
                 console.warn('Unknown message type:', msg.type);

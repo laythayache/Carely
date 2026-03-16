@@ -162,6 +162,7 @@ class Orchestrator:
     async def _action_start_listening(self, data: TransitionResult | None) -> None:
         turn_id = self.fsm.new_turn()
         logger.info(f"[LISTEN] Starting new turn {turn_id}, sending start_capture to audio bridge")
+        await self.ui_server.broadcast_log(f"Starting turn {turn_id[:8]}...", "info")
         self.audio_bridge.send_start_capture()
         self.keyword_spotter.pause()
         logger.info(f"[LISTEN] Keyword spotter paused, waiting for speech...")
@@ -173,28 +174,36 @@ class Orchestrator:
     async def _action_process_speech(self, data: TransitionResult | None) -> None:
         process_start = time.monotonic()
         logger.info(f"[PROCESS] Stopping capture, beginning speech processing (turn={self.fsm.current_turn_id})")
+        await self.ui_server.broadcast_log("Processing speech...", "info")
         self.audio_bridge.send_stop_capture()
         self.fsm.set_recording(False)
         self.keyword_spotter.resume()
 
         logger.info("[PROCESS] Waiting for speech data from audio bridge...")
+        await self.ui_server.broadcast_log("Waiting for audio data...", "info")
         speech_data = await asyncio.get_event_loop().run_in_executor(
             None, self.audio_bridge.get_speech_data
         )
         if not speech_data:
             logger.warning("[PROCESS] No speech data received from audio bridge - aborting")
+            await self.ui_server.broadcast_log("No speech data received!", "warn")
             return
-        logger.info(f"[PROCESS] Got {len(speech_data)} bytes of speech data ({len(speech_data) / 32000:.1f}s of audio)")
+        audio_duration = len(speech_data) / 32000
+        logger.info(f"[PROCESS] Got {len(speech_data)} bytes of speech data ({audio_duration:.1f}s of audio)")
+        await self.ui_server.broadcast_log(f"Got {audio_duration:.1f}s of audio", "info")
 
         try:
             logger.info("[STT] Starting transcription...")
+            await self.ui_server.broadcast_log("Running Whisper STT...", "info")
             stt_start = time.monotonic()
             result = await self.stt.transcribe(speech_data, self.fsm.cancel_event)
             stt_elapsed = int((time.monotonic() - stt_start) * 1000)
             logger.info(f"[STT] Completed in {stt_elapsed}ms: text='{result.text}', lang={result.language}, conf={result.language_confidence:.2f}")
+            await self.ui_server.broadcast_log(f"STT done in {stt_elapsed}ms: '{result.text[:50]}...'", "info")
 
             if not result.text.strip():
                 logger.warning("[STT] Empty transcript returned - firing TIMEOUT to return to idle")
+                await self.ui_server.broadcast_log("Empty transcript - no speech detected", "warn")
                 await self.fsm.handle_event(Event.TIMEOUT)
                 return
 
@@ -228,9 +237,11 @@ class Orchestrator:
     async def _action_send_webhook(self, data: TransitionResult | None) -> None:
         if not data or not data.transcript:
             logger.warning("[WEBHOOK] send_webhook called with no transcript data - skipping")
+            await self.ui_server.broadcast_log("No transcript to send to webhook", "warn")
             return
 
         logger.info(f"[WEBHOOK] Sending to n8n: transcript='{data.transcript[:100]}', lang={data.language}, turn={self.fsm.current_turn_id}")
+        await self.ui_server.broadcast_log(f"Sending to webhook: '{data.transcript[:40]}...'", "info")
         webhook_start = time.monotonic()
 
         try:
@@ -244,9 +255,11 @@ class Orchestrator:
             )
             webhook_elapsed = int((time.monotonic() - webhook_start) * 1000)
             logger.info(f"[WEBHOOK] Response received in {webhook_elapsed}ms: spoken_text='{(response.spoken_text or '')[:100]}', lang={response.language}, turn={response.turn_id}")
+            await self.ui_server.broadcast_log(f"Webhook response in {webhook_elapsed}ms", "info")
 
             if not self.fsm.is_turn_valid(response.turn_id):
                 logger.warning(f"[WEBHOOK] Discarding STALE response - turn {response.turn_id} no longer active (current={self.fsm.current_turn_id})")
+                await self.ui_server.broadcast_log(f"Stale response discarded (wrong turn)", "warn")
                 return
 
             webhook_data = TransitionResult(
@@ -260,6 +273,7 @@ class Orchestrator:
         except WebhookUnavailableError as e:
             webhook_elapsed = int((time.monotonic() - webhook_start) * 1000)
             logger.error(f"[WEBHOOK] FAILED after {webhook_elapsed}ms: {e}")
+            await self.ui_server.broadcast_log(f"Webhook FAILED after {webhook_elapsed}ms: {e}", "error")
             await self.fsm.handle_event(
                 Event.WEBHOOK_TIMEOUT,
                 TransitionResult(transcript=data.transcript),
@@ -267,6 +281,7 @@ class Orchestrator:
         except asyncio.CancelledError:
             webhook_elapsed = int((time.monotonic() - webhook_start) * 1000)
             logger.warning(f"[WEBHOOK] Cancelled after {webhook_elapsed}ms")
+            await self.ui_server.broadcast_log(f"Webhook cancelled after {webhook_elapsed}ms", "warn")
 
     async def _action_start_speaking(self, data: TransitionResult | None) -> None:
         if not data or not data.spoken_text:
@@ -322,9 +337,13 @@ class Orchestrator:
         await self.ui_server.broadcast_error(error_msg, "WEBHOOK_TIMEOUT")
 
     async def _action_handle_processing_timeout(self, data: TransitionResult | None) -> None:
-        logger.error(f"[TIMEOUT] Processing timed out (turn={self.fsm.current_turn_id})")
+        error_msg = "Processing took too long"
+        if data and data.error_message:
+            error_msg = f"Processing failed: {data.error_message}"
+        logger.error(f"[TIMEOUT] {error_msg} (turn={self.fsm.current_turn_id})")
+        await self.ui_server.broadcast_log(f"TIMEOUT: {error_msg}", "error")
         self.fsm.cancel_current_turn()
-        await self.ui_server.broadcast_error("Processing took too long.", "PROCESSING_TIMEOUT")
+        await self.ui_server.broadcast_error(error_msg, "PROCESSING_TIMEOUT")
 
     async def _action_cancel_processing(self, data: TransitionResult | None) -> None:
         logger.info(f"[CANCEL] User cancelled processing (turn={self.fsm.current_turn_id})")

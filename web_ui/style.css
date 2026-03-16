@@ -67,6 +67,81 @@ body {
     transition: opacity 0.3s ease;
 }
 
+#debug-console {
+    position: fixed;
+    bottom: 120px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90%;
+    max-width: 600px;
+    max-height: 200px;
+    background: rgba(0, 0, 0, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 8px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+#debug-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    color: #888;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+#debug-clear {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #888;
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 10px;
+}
+
+#debug-clear:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+#debug-log {
+    padding: 8px 10px;
+    overflow-y: auto;
+    flex: 1;
+    max-height: 150px;
+}
+
+.log-entry {
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    display: flex;
+    gap: 8px;
+}
+
+.log-time {
+    color: #666;
+    flex-shrink: 0;
+}
+
+.log-msg {
+    color: #ccc;
+    word-break: break-word;
+}
+
+.log-entry.info .log-msg { color: #4CAF50; }
+.log-entry.warn .log-msg { color: #FFC107; }
+.log-entry.error .log-msg { color: #F44336; }
+.log-entry.state .log-msg { color: #2196F3; }
+
 #main-button {
     position: fixed;
     bottom: 3rem;

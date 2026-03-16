@@ -120,6 +120,10 @@ class UIServer:
         logger.error(f"[UI] Broadcasting error: '{message}' code={code} to {len(self._ws_clients)} clients")
         await self._broadcast({"type": "error", "message": message, "code": code})
 
+    async def broadcast_log(self, message: str, level: str = "info") -> None:
+        """Send a log message to all connected WebSocket clients for debug console."""
+        await self._broadcast({"type": "log", "message": message, "level": level})
+
     async def _broadcast(self, data: dict[str, Any]) -> None:
         """Send a message to all connected WebSocket clients."""
         if not self._ws_clients:

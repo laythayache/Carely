@@ -34,11 +34,15 @@ REQUEST_SCHEMA = {
 
 RESPONSE_SCHEMA = {
     "type": "object",
-    "required": ["turn_id", "spoken_text"],
+    # No required fields - we'll extract what we can
     "properties": {
         "turn_id": {"type": "string"},
         "spoken_text": {"type": "string"},
-        "language": {"type": "string", "enum": ["en", "ar"]},
+        "text": {"type": "string"},  # n8n AI Agent output field
+        "output": {"type": "string"},  # Alternative n8n field
+        "response": {"type": "string"},  # Another common field
+        "message": {"type": "string"},  # Another common field
+        "language": {"type": "string"},
         "voice_id": {"type": "string"},
         "control": {
             "type": "object",
@@ -139,7 +143,20 @@ class WebhookClient:
             WebhookUnavailableError: If all retries fail
             asyncio.CancelledError: If cancel_event is set
         """
-        logger.info(f"[WEBHOOK] Preparing turn request: turn={turn_id}, lang={language}, transcript='{transcript[:80]}'")
+        # Map unsupported languages to 'unknown' (keep original in metadata)
+        supported_languages = {'en', 'ar', 'mixed', 'unknown'}
+        original_language = language
+        if language not in supported_languages:
+            logger.info(f"[WEBHOOK] Detected language '{language}' not in supported set, mapping to 'unknown'")
+            language = 'unknown'
+
+        logger.info(f"[WEBHOOK] Preparing turn request: turn={turn_id}, lang={language} (detected={original_language}), transcript='{transcript[:80]}'")
+        
+        # Include original detected language in metadata
+        meta = metadata or {}
+        if original_language != language:
+            meta['detected_language'] = original_language
+        
         request = WebhookRequest(
             device_id=self.device_id,
             turn_id=turn_id,
@@ -147,7 +164,7 @@ class WebhookClient:
             language=language,
             language_confidence=language_confidence,
             is_emergency=is_emergency,
-            metadata=metadata or {},
+            metadata=meta,
         )
 
         # Validate outgoing request
@@ -212,10 +229,29 @@ class WebhookClient:
                 ) as resp:
                     elapsed = int((_time.monotonic() - attempt_start) * 1000)
                     if resp.status == 200:
-                        data = await resp.json()
-                        logger.info(f"[WEBHOOK] 200 OK in {elapsed}ms, parsing response...")
-                        logger.debug(f"[WEBHOOK] Raw response: {str(data)[:500]}")
-                        result = self._parse_response(data)
+                        raw_text = await resp.text()
+                        elapsed = int((_time.monotonic() - attempt_start) * 1000)
+                        logger.info(f"[WEBHOOK] 200 OK in {elapsed}ms, raw body ({len(raw_text)} bytes): {raw_text[:500]}")
+                        
+                        # Handle empty body
+                        if not raw_text or raw_text.strip() == "":
+                            logger.error(f"[WEBHOOK] Empty response body from webhook")
+                            raise RuntimeError("Webhook returned empty response body")
+                        
+                        # Parse JSON
+                        import json
+                        try:
+                            data = json.loads(raw_text)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"[WEBHOOK] Invalid JSON: {e}")
+                            raise RuntimeError(f"Webhook returned invalid JSON: {raw_text[:200]}")
+                        
+                        # Handle null JSON value
+                        if data is None:
+                            logger.error(f"[WEBHOOK] JSON parsed to null: {raw_text[:200]}")
+                            raise RuntimeError("Webhook returned JSON null")
+                        
+                        result = self._parse_response(data, fallback_turn_id=request.turn_id)
                         logger.info(f"[WEBHOOK] Parsed: spoken_text='{(result.spoken_text or '')[:80]}', lang={result.language}")
                         return result
                     elif resp.status >= 500:
@@ -269,19 +305,62 @@ class WebhookClient:
             f"Webhook failed after {retries + 1} attempts: {last_error}"
         )
 
-    def _parse_response(self, data: dict[str, Any]) -> WebhookResponse:
-        """Validate and parse webhook response."""
-        try:
-            jsonschema.validate(data, RESPONSE_SCHEMA)
-        except jsonschema.ValidationError as e:
-            logger.error(f"[WEBHOOK] Response validation FAILED: {e.message}")
-            logger.error(f"[WEBHOOK] Bad response data: {data}")
-            raise
-
+    def _parse_response(self, data: dict[str, Any], fallback_turn_id: str = "") -> WebhookResponse:
+        """Parse webhook response flexibly to handle various n8n output formats."""
+        
+        # Handle n8n array wrapper - take first element if array
+        if isinstance(data, list):
+            if len(data) == 0:
+                raise ValueError("Webhook returned empty array")
+            data = data[0]
+            logger.debug(f"[WEBHOOK] Unwrapped array response, using first element")
+        
+        if not isinstance(data, dict):
+            # If it's just a string, treat as spoken_text
+            if isinstance(data, str):
+                logger.info(f"[WEBHOOK] Response is plain string, using as spoken_text")
+                return WebhookResponse(
+                    turn_id=fallback_turn_id,
+                    spoken_text=data,
+                    language="en",
+                )
+            raise ValueError(f"Unexpected response type: {type(data).__name__}")
+        
+        # Extract spoken_text from various n8n output field names
+        spoken_text = None
+        for field in ["spoken_text", "text", "output", "response", "message", "content", "answer"]:
+            if field in data and data[field]:
+                spoken_text = str(data[field])
+                logger.debug(f"[WEBHOOK] Found spoken_text in field '{field}'")
+                break
+        
+        # If no text field found, check for nested structures (n8n AI Agent format)
+        if not spoken_text:
+            # Check for n8n AI Agent nested output: {"output": {"text": "..."}}
+            if isinstance(data.get("output"), dict):
+                nested = data["output"]
+                for field in ["text", "content", "message", "response"]:
+                    if field in nested and nested[field]:
+                        spoken_text = str(nested[field])
+                        logger.debug(f"[WEBHOOK] Found spoken_text in nested output.{field}")
+                        break
+        
+        if not spoken_text:
+            logger.error(f"[WEBHOOK] Could not extract text from response: {data}")
+            raise ValueError(f"No text content found in webhook response. Keys: {list(data.keys())}")
+        
+        # Extract turn_id or use fallback
+        turn_id = data.get("turn_id", "") or fallback_turn_id
+        
+        # Extract language (flexible)
+        language = data.get("language", "en")
+        if language not in ["en", "ar"]:
+            language = "en"  # Default to English for TTS
+        
         return WebhookResponse(
-            turn_id=data["turn_id"],
-            spoken_text=data["spoken_text"],
-            language=data.get("language", "en"),
+            turn_id=turn_id,
+            spoken_text=spoken_text,
+            language=language,
             voice_id=data.get("voice_id", ""),
             control=data.get("control", {}),
         )
